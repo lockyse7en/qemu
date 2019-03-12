@@ -33,7 +33,7 @@
 #include "qemu/option.h"
 #include "qemu/sockets.h"
 #include "qemu/timer.h"
-#include "qemu/acl.h"
+#include "authz/list.h"
 #include "qemu/config-file.h"
 #include "qapi/qapi-emit-events.h"
 #include "qapi/qapi-events-ui.h"
@@ -700,6 +700,12 @@ static void vnc_abort_display_jobs(VncDisplay *vd)
     }
     QTAILQ_FOREACH(vs, &vd->clients, next) {
         vnc_lock_output(vs);
+        if (vs->update == VNC_STATE_UPDATE_NONE &&
+            vs->job_update != VNC_STATE_UPDATE_NONE) {
+            /* job aborted before completion */
+            vs->update = vs->job_update;
+            vs->job_update = VNC_STATE_UPDATE_NONE;
+        }
         vs->abort = false;
         vnc_unlock_output(vs);
     }
@@ -3229,12 +3235,24 @@ static void vnc_display_close(VncDisplay *vd)
         object_unparent(OBJECT(vd->tlscreds));
         vd->tlscreds = NULL;
     }
-    g_free(vd->tlsaclname);
-    vd->tlsaclname = NULL;
+    if (vd->tlsauthz) {
+        object_unparent(OBJECT(vd->tlsauthz));
+        vd->tlsauthz = NULL;
+    }
+    g_free(vd->tlsauthzid);
+    vd->tlsauthzid = NULL;
     if (vd->lock_key_sync) {
         qemu_remove_led_event_handler(vd->led);
         vd->led = NULL;
     }
+#ifdef CONFIG_VNC_SASL
+    if (vd->sasl.authz) {
+        object_unparent(OBJECT(vd->sasl.authz));
+        vd->sasl.authz = NULL;
+    }
+    g_free(vd->sasl.authzid);
+    vd->sasl.authzid = NULL;
+#endif
 }
 
 int vnc_display_password(const char *id, const char *password)
@@ -3345,6 +3363,12 @@ static QemuOptsList qemu_vnc_opts = {
         },{
             .name = "acl",
             .type = QEMU_OPT_BOOL,
+        },{
+            .name = "tls-authz",
+            .type = QEMU_OPT_STRING,
+        },{
+            .name = "sasl-authz",
+            .type = QEMU_OPT_STRING,
         },{
             .name = "lossy",
             .type = QEMU_OPT_BOOL,
@@ -3784,6 +3808,8 @@ void vnc_display_open(const char *id, Error **errp)
     const char *credid;
     bool sasl = false;
     int acl = 0;
+    const char *tlsauthz;
+    const char *saslauthz;
     int lock_key_sync = 1;
     int key_delay_ms;
 
@@ -3855,7 +3881,33 @@ void vnc_display_open(const char *id, Error **errp)
             goto fail;
         }
     }
+    if (qemu_opt_get(opts, "acl")) {
+        error_report("The 'acl' option to -vnc is deprecated. "
+                     "Please use the 'tls-authz' and 'sasl-authz' "
+                     "options instead");
+    }
     acl = qemu_opt_get_bool(opts, "acl", false);
+    tlsauthz = qemu_opt_get(opts, "tls-authz");
+    if (acl && tlsauthz) {
+        error_setg(errp, "'acl' option is mutually exclusive with the "
+                   "'tls-authz' option");
+        goto fail;
+    }
+    if (tlsauthz && !vd->tlscreds) {
+        error_setg(errp, "'tls-authz' provided but TLS is not enabled");
+        goto fail;
+    }
+
+    saslauthz = qemu_opt_get(opts, "sasl-authz");
+    if (acl && saslauthz) {
+        error_setg(errp, "'acl' option is mutually exclusive with the "
+                   "'sasl-authz' option");
+        goto fail;
+    }
+    if (saslauthz && !sasl) {
+        error_setg(errp, "'sasl-authz' provided but SASL auth is not enabled");
+        goto fail;
+    }
 
     share = qemu_opt_get(opts, "share");
     if (share) {
@@ -3885,25 +3937,32 @@ void vnc_display_open(const char *id, Error **errp)
         vd->non_adaptive = true;
     }
 
-    if (acl) {
+    if (tlsauthz) {
+        vd->tlsauthzid = g_strdup(tlsauthz);
+    } else if (acl) {
         if (strcmp(vd->id, "default") == 0) {
-            vd->tlsaclname = g_strdup("vnc.x509dname");
+            vd->tlsauthzid = g_strdup("vnc.x509dname");
         } else {
-            vd->tlsaclname = g_strdup_printf("vnc.%s.x509dname", vd->id);
+            vd->tlsauthzid = g_strdup_printf("vnc.%s.x509dname", vd->id);
         }
-        qemu_acl_init(vd->tlsaclname);
+        vd->tlsauthz = QAUTHZ(qauthz_list_new(vd->tlsauthzid,
+                                              QAUTHZ_LIST_POLICY_DENY,
+                                              &error_abort));
     }
 #ifdef CONFIG_VNC_SASL
-    if (acl && sasl) {
-        char *aclname;
-
-        if (strcmp(vd->id, "default") == 0) {
-            aclname = g_strdup("vnc.username");
-        } else {
-            aclname = g_strdup_printf("vnc.%s.username", vd->id);
+    if (sasl) {
+        if (saslauthz) {
+            vd->sasl.authzid = g_strdup(saslauthz);
+        } else if (acl) {
+            if (strcmp(vd->id, "default") == 0) {
+                vd->sasl.authzid = g_strdup("vnc.username");
+            } else {
+                vd->sasl.authzid = g_strdup_printf("vnc.%s.username", vd->id);
+            }
+            vd->sasl.authz = QAUTHZ(qauthz_list_new(vd->sasl.authzid,
+                                                    QAUTHZ_LIST_POLICY_DENY,
+                                                    &error_abort));
         }
-        vd->sasl.acl = qemu_acl_init(aclname);
-        g_free(aclname);
     }
 #endif
 

@@ -3566,7 +3566,8 @@ static void gen_doze(DisasContext *ctx)
     t = tcg_const_i32(PPC_PM_DOZE);
     gen_helper_pminsn(cpu_env, t);
     tcg_temp_free_i32(t);
-    gen_stop_exception(ctx);
+    /* Stop translation, as the CPU is supposed to sleep from now */
+    gen_exception_nip(ctx, EXCP_HLT, ctx->base.pc_next);
 #endif /* defined(CONFIG_USER_ONLY) */
 }
 
@@ -3581,13 +3582,25 @@ static void gen_nap(DisasContext *ctx)
     t = tcg_const_i32(PPC_PM_NAP);
     gen_helper_pminsn(cpu_env, t);
     tcg_temp_free_i32(t);
-    gen_stop_exception(ctx);
+    /* Stop translation, as the CPU is supposed to sleep from now */
+    gen_exception_nip(ctx, EXCP_HLT, ctx->base.pc_next);
 #endif /* defined(CONFIG_USER_ONLY) */
 }
 
 static void gen_stop(DisasContext *ctx)
 {
-    gen_nap(ctx);
+#if defined(CONFIG_USER_ONLY)
+    GEN_PRIV;
+#else
+    TCGv_i32 t;
+
+    CHK_HV;
+    t = tcg_const_i32(PPC_PM_STOP);
+    gen_helper_pminsn(cpu_env, t);
+    tcg_temp_free_i32(t);
+    /* Stop translation, as the CPU is supposed to sleep from now */
+    gen_exception_nip(ctx, EXCP_HLT, ctx->base.pc_next);
+#endif /* defined(CONFIG_USER_ONLY) */
 }
 
 static void gen_sleep(DisasContext *ctx)
@@ -3601,7 +3614,8 @@ static void gen_sleep(DisasContext *ctx)
     t = tcg_const_i32(PPC_PM_SLEEP);
     gen_helper_pminsn(cpu_env, t);
     tcg_temp_free_i32(t);
-    gen_stop_exception(ctx);
+    /* Stop translation, as the CPU is supposed to sleep from now */
+    gen_exception_nip(ctx, EXCP_HLT, ctx->base.pc_next);
 #endif /* defined(CONFIG_USER_ONLY) */
 }
 
@@ -3616,7 +3630,8 @@ static void gen_rvwinkle(DisasContext *ctx)
     t = tcg_const_i32(PPC_PM_RVWINKLE);
     gen_helper_pminsn(cpu_env, t);
     tcg_temp_free_i32(t);
-    gen_stop_exception(ctx);
+    /* Stop translation, as the CPU is supposed to sleep from now */
+    gen_exception_nip(ctx, EXCP_HLT, ctx->base.pc_next);
 #endif /* defined(CONFIG_USER_ONLY) */
 }
 #endif /* #if defined(TARGET_PPC64) */
@@ -6662,34 +6677,22 @@ GEN_TM_PRIV_NOOP(trechkpt);
 
 static inline void get_fpr(TCGv_i64 dst, int regno)
 {
-    tcg_gen_ld_i64(dst, cpu_env, offsetof(CPUPPCState, vsr[regno].u64[0]));
+    tcg_gen_ld_i64(dst, cpu_env, fpr_offset(regno));
 }
 
 static inline void set_fpr(int regno, TCGv_i64 src)
 {
-    tcg_gen_st_i64(src, cpu_env, offsetof(CPUPPCState, vsr[regno].u64[0]));
+    tcg_gen_st_i64(src, cpu_env, fpr_offset(regno));
 }
 
 static inline void get_avr64(TCGv_i64 dst, int regno, bool high)
 {
-#ifdef HOST_WORDS_BIGENDIAN
-    tcg_gen_ld_i64(dst, cpu_env, offsetof(CPUPPCState,
-                                          vsr[32 + regno].u64[(high ? 0 : 1)]));
-#else
-    tcg_gen_ld_i64(dst, cpu_env, offsetof(CPUPPCState,
-                                          vsr[32 + regno].u64[(high ? 1 : 0)]));
-#endif
+    tcg_gen_ld_i64(dst, cpu_env, avr64_offset(regno, high));
 }
 
 static inline void set_avr64(int regno, TCGv_i64 src, bool high)
 {
-#ifdef HOST_WORDS_BIGENDIAN
-    tcg_gen_st_i64(src, cpu_env, offsetof(CPUPPCState,
-                                          vsr[32 + regno].u64[(high ? 0 : 1)]));
-#else
-    tcg_gen_st_i64(src, cpu_env, offsetof(CPUPPCState,
-                                          vsr[32 + regno].u64[(high ? 1 : 0)]));
-#endif
+    tcg_gen_st_i64(src, cpu_env, avr64_offset(regno, high));
 }
 
 #include "translate/fp-impl.inc.c"
@@ -7402,7 +7405,7 @@ void ppc_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
 #if !defined(NO_TIMER_DUMP)
     cpu_fprintf(f, "TB %08" PRIu32 " %08" PRIu64
 #if !defined(CONFIG_USER_ONLY)
-                " DECR %08" PRIu32
+                " DECR " TARGET_FMT_lu
 #endif
                 "\n",
                 cpu_ppc_load_tbu(env), cpu_ppc_load_tbl(env)
@@ -7466,7 +7469,8 @@ void ppc_cpu_dump_state(CPUState *cs, FILE *f, fprintf_function cpu_fprintf,
 
 #if defined(TARGET_PPC64)
     if (env->excp_model == POWERPC_EXCP_POWER7 ||
-        env->excp_model == POWERPC_EXCP_POWER8) {
+        env->excp_model == POWERPC_EXCP_POWER8 ||
+        env->excp_model == POWERPC_EXCP_POWER9)  {
         cpu_fprintf(f, "HSRR0 " TARGET_FMT_lx " HSRR1 " TARGET_FMT_lx "\n",
                     env->spr[SPR_HSRR0], env->spr[SPR_HSRR1]);
     }

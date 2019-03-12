@@ -166,6 +166,27 @@ void hmp_info_mice(Monitor *mon, const QDict *qdict)
     qapi_free_MouseInfoList(mice_list);
 }
 
+static char *SocketAddress_to_str(SocketAddress *addr)
+{
+    switch (addr->type) {
+    case SOCKET_ADDRESS_TYPE_INET:
+        return g_strdup_printf("tcp:%s:%s",
+                               addr->u.inet.host,
+                               addr->u.inet.port);
+    case SOCKET_ADDRESS_TYPE_UNIX:
+        return g_strdup_printf("unix:%s",
+                               addr->u.q_unix.path);
+    case SOCKET_ADDRESS_TYPE_FD:
+        return g_strdup_printf("fd:%s", addr->u.fd.str);
+    case SOCKET_ADDRESS_TYPE_VSOCK:
+        return g_strdup_printf("tcp:%s:%s",
+                               addr->u.vsock.cid,
+                               addr->u.vsock.port);
+    default:
+        return g_strdup("unknown address type");
+    }
+}
+
 void hmp_info_migrate(Monitor *mon, const QDict *qdict)
 {
     MigrationInfo *info;
@@ -306,6 +327,18 @@ void hmp_info_migrate(Monitor *mon, const QDict *qdict)
         g_free(str);
         visit_free(v);
     }
+    if (info->has_socket_address) {
+        SocketAddressList *addr;
+
+        monitor_printf(mon, "socket address: [\n");
+
+        for (addr = info->socket_address; addr; addr = addr->next) {
+            char *s = SocketAddress_to_str(addr->value);
+            monitor_printf(mon, "\t%s\n", s);
+            g_free(s);
+        }
+        monitor_printf(mon, "]\n");
+    }
     qapi_free_MigrationInfo(info);
     qapi_free_MigrationCapabilityStatusList(caps);
 }
@@ -334,6 +367,18 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
     params = qmp_query_migrate_parameters(NULL);
 
     if (params) {
+        monitor_printf(mon, "%s: %" PRIu64 " ms\n",
+            MigrationParameter_str(MIGRATION_PARAMETER_ANNOUNCE_INITIAL),
+            params->announce_initial);
+        monitor_printf(mon, "%s: %" PRIu64 " ms\n",
+            MigrationParameter_str(MIGRATION_PARAMETER_ANNOUNCE_MAX),
+            params->announce_max);
+        monitor_printf(mon, "%s: %" PRIu64 "\n",
+            MigrationParameter_str(MIGRATION_PARAMETER_ANNOUNCE_ROUNDS),
+            params->announce_rounds);
+        monitor_printf(mon, "%s: %" PRIu64 " ms\n",
+            MigrationParameter_str(MIGRATION_PARAMETER_ANNOUNCE_STEP),
+            params->announce_step);
         assert(params->has_compress_level);
         monitor_printf(mon, "%s: %u\n",
             MigrationParameter_str(MIGRATION_PARAMETER_COMPRESS_LEVEL),
@@ -1558,6 +1603,11 @@ void hmp_info_snapshots(Monitor *mon, const QDict *qdict)
 
 }
 
+void hmp_announce_self(Monitor *mon, const QDict *qdict)
+{
+    qmp_announce_self(migrate_announce_params(), NULL);
+}
+
 void hmp_migrate_cancel(Monitor *mon, const QDict *qdict)
 {
     qmp_migrate_cancel(NULL);
@@ -1756,6 +1806,22 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
     case MIGRATION_PARAMETER_MAX_POSTCOPY_BANDWIDTH:
         p->has_max_postcopy_bandwidth = true;
         visit_type_size(v, param, &p->max_postcopy_bandwidth, &err);
+        break;
+    case MIGRATION_PARAMETER_ANNOUNCE_INITIAL:
+        p->has_announce_initial = true;
+        visit_type_size(v, param, &p->announce_initial, &err);
+        break;
+    case MIGRATION_PARAMETER_ANNOUNCE_MAX:
+        p->has_announce_max = true;
+        visit_type_size(v, param, &p->announce_max, &err);
+        break;
+    case MIGRATION_PARAMETER_ANNOUNCE_ROUNDS:
+        p->has_announce_rounds = true;
+        visit_type_size(v, param, &p->announce_rounds, &err);
+        break;
+    case MIGRATION_PARAMETER_ANNOUNCE_STEP:
+        p->has_announce_step = true;
+        visit_type_size(v, param, &p->announce_step, &err);
         break;
     default:
         assert(0);
@@ -2307,7 +2373,7 @@ void hmp_nbd_server_start(Monitor *mon, const QDict *qdict)
         goto exit;
     }
 
-    nbd_server_start(addr, NULL, &local_err);
+    nbd_server_start(addr, NULL, NULL, &local_err);
     qapi_free_SocketAddress(addr);
     if (local_err != NULL) {
         goto exit;

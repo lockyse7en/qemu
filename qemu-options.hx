@@ -1211,6 +1211,7 @@ STEXI
 ETEXI
 
 DEF("display", HAS_ARG, QEMU_OPTION_display,
+    "-display spice-app[,gl=on|off]\n"
     "-display sdl[,frame=on|off][,alt_grab=on|off][,ctrl_grab=on|off]\n"
     "            [,window_close=on|off][,gl=on|core|es|off]\n"
     "-display gtk[,grab_on_hover=on|off][,gl=on|off]|\n"
@@ -1262,6 +1263,10 @@ Start a VNC server on display <arg>
 @item egl-headless
 Offload all OpenGL operations to a local DRI device. For any graphical display,
 this display needs to be paired with either VNC or SPICE displays.
+@item spice-app
+Start QEMU as a Spice server and launch the default Spice client
+application. The Spice server will redirect the serial consoles and
+QEMU monitors. (Since 4.0)
 @end table
 ETEXI
 
@@ -1619,6 +1624,14 @@ will cause the VNC server socket to enable the VeNCrypt auth
 mechanism.  The credentials should have been previously created
 using the @option{-object tls-creds} argument.
 
+@item tls-authz=@var{ID}
+
+Provides the ID of the QAuthZ authorization object against which
+the client's x509 distinguished name will validated. This object is
+only resolved at time of use, so can be deleted and recreated on the
+fly while the VNC server is active. If missing, it will default
+to denying access.
+
 @item sasl
 
 Require that the client use SASL to authenticate with the VNC server.
@@ -1634,18 +1647,25 @@ ensures a data encryption preventing compromise of authentication
 credentials. See the @ref{vnc_security} section for details on using
 SASL authentication.
 
+@item sasl-authz=@var{ID}
+
+Provides the ID of the QAuthZ authorization object against which
+the client's SASL username will validated. This object is
+only resolved at time of use, so can be deleted and recreated on the
+fly while the VNC server is active. If missing, it will default
+to denying access.
+
 @item acl
 
-Turn on access control lists for checking of the x509 client certificate
-and SASL party. For x509 certs, the ACL check is made against the
-certificate's distinguished name. This is something that looks like
-@code{C=GB,O=ACME,L=Boston,CN=bob}. For SASL party, the ACL check is
-made against the username, which depending on the SASL plugin, may
-include a realm component, eg @code{bob} or @code{bob@@EXAMPLE.COM}.
-When the @option{acl} flag is set, the initial access list will be
-empty, with a @code{deny} policy. Thus no one will be allowed to
-use the VNC server until the ACLs have been loaded. This can be
-achieved using the @code{acl} monitor command.
+Legacy method for enabling authorization of clients against the
+x509 distinguished name and SASL username. It results in the creation
+of two @code{authz-list} objects with IDs of @code{vnc.username} and
+@code{vnc.x509dname}. The rules for these objects must be configured
+with the HMP ACL commands.
+
+This option is deprecated and should no longer be used. The new
+@option{sasl-authz} and @option{tls-authz} options are a
+replacement.
 
 @item lossy
 
@@ -2408,7 +2428,7 @@ DEF("chardev", HAS_ARG, QEMU_OPTION_chardev,
     "-chardev null,id=id[,mux=on|off][,logfile=PATH][,logappend=on|off]\n"
     "-chardev socket,id=id[,host=host],port=port[,to=to][,ipv4][,ipv6][,nodelay][,reconnect=seconds]\n"
     "         [,server][,nowait][,telnet][,websocket][,reconnect=seconds][,mux=on|off]\n"
-    "         [,logfile=PATH][,logappend=on|off][,tls-creds=ID] (tcp)\n"
+    "         [,logfile=PATH][,logappend=on|off][,tls-creds=ID][,tls-authz=ID] (tcp)\n"
     "-chardev socket,id=id,path=path[,server][,nowait][,telnet][,websocket][,reconnect=seconds]\n"
     "         [,mux=on|off][,logfile=PATH][,logappend=on|off] (unix)\n"
     "-chardev udp,id=id[,host=host],port=port[,localaddr=localaddr]\n"
@@ -2537,7 +2557,7 @@ The available backends are:
 A void device. This device will not emit any data, and will drop any data it
 receives. The null backend does not take any options.
 
-@item -chardev socket,id=@var{id}[,@var{TCP options} or @var{unix options}][,server][,nowait][,telnet][,websocket][,reconnect=@var{seconds}][,tls-creds=@var{id}]
+@item -chardev socket,id=@var{id}[,@var{TCP options} or @var{unix options}][,server][,nowait][,telnet][,websocket][,reconnect=@var{seconds}][,tls-creds=@var{id}][,tls-authz=@var{id}]
 
 Create a two-way stream socket, which can be either a TCP or a unix socket. A
 unix socket will be created if @option{path} is specified. Behaviour is
@@ -2562,6 +2582,12 @@ to reconnect.  Zero disables reconnecting, and is the default.
 and specifies the id of the TLS credentials to use for the handshake. The
 credentials must be previously created with the @option{-object tls-creds}
 argument.
+
+@option{tls-auth} provides the ID of the QAuthZ authorization object against
+which the client's x509 distinguished name will be validated. This object is
+only resolved at time of use, so can be deleted and recreated on the fly
+while the chardev server is active. If missing, it will default to denying
+access.
 
 TCP and unix socket options are given below:
 
@@ -4360,6 +4386,111 @@ e.g to launch a SEV guest
      .....
 
 @end example
+
+
+@item -object authz-simple,id=@var{id},identity=@var{string}
+
+Create an authorization object that will control access to network services.
+
+The @option{identity} parameter is identifies the user and its format
+depends on the network service that authorization object is associated
+with. For authorizing based on TLS x509 certificates, the identity must
+be the x509 distinguished name. Note that care must be taken to escape
+any commas in the distinguished name.
+
+An example authorization object to validate a x509 distinguished name
+would look like:
+@example
+ # $QEMU \
+     ...
+     -object 'authz-simple,id=auth0,identity=CN=laptop.example.com,,O=Example Org,,L=London,,ST=London,,C=GB' \
+     ...
+@end example
+
+Note the use of quotes due to the x509 distinguished name containing
+whitespace, and escaping of ','.
+
+@item -object authz-listfile,id=@var{id},filename=@var{path},refresh=@var{yes|no}
+
+Create an authorization object that will control access to network services.
+
+The @option{filename} parameter is the fully qualified path to a file
+containing the access control list rules in JSON format.
+
+An example set of rules that match against SASL usernames might look
+like:
+
+@example
+  @{
+    "rules": [
+       @{ "match": "fred", "policy": "allow", "format": "exact" @},
+       @{ "match": "bob", "policy": "allow", "format": "exact" @},
+       @{ "match": "danb", "policy": "deny", "format": "glob" @},
+       @{ "match": "dan*", "policy": "allow", "format": "exact" @},
+    ],
+    "policy": "deny"
+  @}
+@end example
+
+When checking access the object will iterate over all the rules and
+the first rule to match will have its @option{policy} value returned
+as the result. If no rules match, then the default @option{policy}
+value is returned.
+
+The rules can either be an exact string match, or they can use the
+simple UNIX glob pattern matching to allow wildcards to be used.
+
+If @option{refresh} is set to true the file will be monitored
+and automatically reloaded whenever its content changes.
+
+As with the @code{authz-simple} object, the format of the identity
+strings being matched depends on the network service, but is usually
+a TLS x509 distinguished name, or a SASL username.
+
+An example authorization object to validate a SASL username
+would look like:
+@example
+ # $QEMU \
+     ...
+     -object authz-simple,id=auth0,filename=/etc/qemu/vnc-sasl.acl,refresh=yes
+     ...
+@end example
+
+@item -object authz-pam,id=@var{id},service=@var{string}
+
+Create an authorization object that will control access to network services.
+
+The @option{service} parameter provides the name of a PAM service to use
+for authorization. It requires that a file @code{/etc/pam.d/@var{service}}
+exist to provide the configuration for the @code{account} subsystem.
+
+An example authorization object to validate a TLS x509 distinguished
+name would look like:
+
+@example
+ # $QEMU \
+     ...
+     -object authz-pam,id=auth0,service=qemu-vnc
+     ...
+@end example
+
+There would then be a corresponding config file for PAM at
+@code{/etc/pam.d/qemu-vnc} that contains:
+
+@example
+account requisite  pam_listfile.so item=user sense=allow \
+           file=/etc/qemu/vnc.allow
+@end example
+
+Finally the @code{/etc/qemu/vnc.allow} file would contain
+the list of x509 distingished names that are permitted
+access
+
+@example
+CN=laptop.example.com,O=Example Home,L=London,ST=London,C=GB
+@end example
+
+
 @end table
 
 ETEXI

@@ -408,6 +408,11 @@ static void spr_write_pidr(DisasContext *ctx, int sprn, int gprn)
     gen_helper_store_pidr(cpu_env, cpu_gpr[gprn]);
 }
 
+static void spr_write_lpidr(DisasContext *ctx, int sprn, int gprn)
+{
+    gen_helper_store_lpidr(cpu_env, cpu_gpr[gprn]);
+}
+
 static void spr_read_hior(DisasContext *ctx, int gprn, int sprn)
 {
     tcg_gen_ld_tl(cpu_gpr[gprn], cpu_env, offsetof(CPUPPCState, excp_prefix));
@@ -3310,6 +3315,15 @@ static void init_excp_POWER8(CPUPPCState *env)
     env->excp_vectors[POWERPC_EXCP_FU]       = 0x00000F60;
     env->excp_vectors[POWERPC_EXCP_HV_FU]    = 0x00000F80;
     env->excp_vectors[POWERPC_EXCP_SDOOR_HV] = 0x00000E80;
+#endif
+}
+
+static void init_excp_POWER9(CPUPPCState *env)
+{
+    init_excp_POWER8(env);
+
+#if !defined(CONFIG_USER_ONLY)
+    env->excp_vectors[POWERPC_EXCP_HVIRT]    = 0x00000EA0;
 #endif
 }
 
@@ -7876,7 +7890,7 @@ static void gen_spr_book3s_ids(CPUPPCState *env)
     spr_register_hv(env, SPR_LPIDR, "LPIDR",
                  SPR_NOACCESS, SPR_NOACCESS,
                  SPR_NOACCESS, SPR_NOACCESS,
-                 &spr_read_generic, &spr_write_generic,
+                 &spr_read_generic, &spr_write_lpidr,
                  0x00000000);
     spr_register_hv(env, SPR_HFSCR, "HFSCR",
                  SPR_NOACCESS, SPR_NOACCESS,
@@ -8362,6 +8376,7 @@ POWERPC_FAMILY(POWER5P)(ObjectClass *oc, void *data)
 #if defined(CONFIG_SOFTMMU)
     pcc->handle_mmu_fault = ppc_hash64_handle_mmu_fault;
     pcc->hash64_opts = &ppc_hash64_opts_basic;
+    pcc->lrg_decr_bits = 32;
 #endif
     pcc->excp_model = POWERPC_EXCP_970;
     pcc->bus_model = PPC_FLAGS_INPUT_970;
@@ -8536,6 +8551,7 @@ POWERPC_FAMILY(POWER7)(ObjectClass *oc, void *data)
 #if defined(CONFIG_SOFTMMU)
     pcc->handle_mmu_fault = ppc_hash64_handle_mmu_fault;
     pcc->hash64_opts = &ppc_hash64_opts_POWER7;
+    pcc->lrg_decr_bits = 32;
 #endif
     pcc->excp_model = POWERPC_EXCP_POWER7;
     pcc->bus_model = PPC_FLAGS_INPUT_POWER7;
@@ -8704,6 +8720,7 @@ POWERPC_FAMILY(POWER8)(ObjectClass *oc, void *data)
 #if defined(CONFIG_SOFTMMU)
     pcc->handle_mmu_fault = ppc_hash64_handle_mmu_fault;
     pcc->hash64_opts = &ppc_hash64_opts_POWER7;
+    pcc->lrg_decr_bits = 32;
 #endif
     pcc->excp_model = POWERPC_EXCP_POWER8;
     pcc->bus_model = PPC_FLAGS_INPUT_POWER7;
@@ -8783,8 +8800,8 @@ static void init_proc_POWER9(CPUPPCState *env)
     env->icache_line_size = 128;
 
     /* Allocate hardware IRQ controller */
-    init_excp_POWER8(env);
-    ppcPOWER7_irq_init(ppc_env_get_cpu(env));
+    init_excp_POWER9(env);
+    ppcPOWER9_irq_init(ppc_env_get_cpu(env));
 }
 
 static bool ppc_pvr_match_power9(PowerPCCPUClass *pcc, uint32_t pvr)
@@ -8801,13 +8818,23 @@ static bool cpu_has_work_POWER9(CPUState *cs)
     CPUPPCState *env = &cpu->env;
 
     if (cs->halted) {
+        uint64_t psscr = env->spr[SPR_PSSCR];
+
         if (!(cs->interrupt_request & CPU_INTERRUPT_HARD)) {
             return false;
+        }
+
+        /* If EC is clear, just return true on any pending interrupt */
+        if (!(psscr & PSSCR_EC)) {
+            return true;
         }
         /* External Exception */
         if ((env->pending_interrupts & (1u << PPC_INTERRUPT_EXT)) &&
             (env->spr[SPR_LPCR] & LPCR_EEE)) {
-            return true;
+            bool heic = !!(env->spr[SPR_LPCR] & LPCR_HEIC);
+            if (heic == 0 || !msr_hv || msr_pr) {
+                return true;
+            }
         }
         /* Decrementer Exception */
         if ((env->pending_interrupts & (1u << PPC_INTERRUPT_DECR)) &&
@@ -8827,6 +8854,11 @@ static bool cpu_has_work_POWER9(CPUState *cs)
         /* Hypervisor Doorbell Exception */
         if ((env->pending_interrupts & (1u << PPC_INTERRUPT_HDOORBELL)) &&
             (env->spr[SPR_LPCR] & LPCR_HDEE)) {
+            return true;
+        }
+        /* Hypervisor virtualization exception */
+        if ((env->pending_interrupts & (1u << PPC_INTERRUPT_HVIRT)) &&
+            (env->spr[SPR_LPCR] & LPCR_HVEE)) {
             return true;
         }
         if (env->pending_interrupts & (1u << PPC_INTERRUPT_RESET)) {
@@ -8863,7 +8895,7 @@ POWERPC_FAMILY(POWER9)(ObjectClass *oc, void *data)
                        PPC_CACHE | PPC_CACHE_ICBI | PPC_CACHE_DCBZ |
                        PPC_MEM_SYNC | PPC_MEM_EIEIO |
                        PPC_MEM_TLBSYNC |
-                       PPC_64B | PPC_64BX | PPC_ALTIVEC |
+                       PPC_64B | PPC_64H | PPC_64BX | PPC_ALTIVEC |
                        PPC_SEGMENT_64B | PPC_SLBI |
                        PPC_POPCNTB | PPC_POPCNTWD |
                        PPC_CILDST;
@@ -8875,6 +8907,7 @@ POWERPC_FAMILY(POWER9)(ObjectClass *oc, void *data)
                         PPC2_ISA205 | PPC2_ISA207S | PPC2_FP_CVT_S64 |
                         PPC2_TM | PPC2_ISA300 | PPC2_PRCNTL;
     pcc->msr_mask = (1ull << MSR_SF) |
+                    (1ull << MSR_SHV) |
                     (1ull << MSR_TM) |
                     (1ull << MSR_VR) |
                     (1ull << MSR_VSX) |
@@ -8897,9 +8930,10 @@ POWERPC_FAMILY(POWER9)(ObjectClass *oc, void *data)
     /* segment page size remain the same */
     pcc->hash64_opts = &ppc_hash64_opts_POWER7;
     pcc->radix_page_info = &POWER9_radix_page_info;
+    pcc->lrg_decr_bits = 56;
 #endif
-    pcc->excp_model = POWERPC_EXCP_POWER8;
-    pcc->bus_model = PPC_FLAGS_INPUT_POWER7;
+    pcc->excp_model = POWERPC_EXCP_POWER9;
+    pcc->bus_model = PPC_FLAGS_INPUT_POWER9;
     pcc->bfd_mach = bfd_mach_ppc64;
     pcc->flags = POWERPC_FLAG_VRE | POWERPC_FLAG_SE |
                  POWERPC_FLAG_BE | POWERPC_FLAG_PMM |

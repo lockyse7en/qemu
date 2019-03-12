@@ -59,6 +59,13 @@
 #
 # @compat: compatibility level
 #
+# @data-file: the filename of the external data file that is stored in the
+#             image and used as a default for opening the image (since: 4.0)
+#
+# @data-file-raw: True if the external data file must stay valid as a
+#                 standalone (read-only) raw image without looking at qcow2
+#                 metadata (since: 4.0)
+#
 # @lazy-refcounts: on or off; only valid for compat >= 1.1
 #
 # @corrupt: true if the image has been marked corrupt; only valid for
@@ -76,6 +83,8 @@
 { 'struct': 'ImageInfoSpecificQCow2',
   'data': {
       'compat': 'str',
+      '*data-file': 'str',
+      '*data-file-raw': 'bool',
       '*lazy-refcounts': 'bool',
       '*corrupt': 'bool',
       'refcount-bits': 'int',
@@ -420,17 +429,27 @@
 #
 # An enumeration of possible states that a dirty bitmap can report to the user.
 #
-# @frozen: The bitmap is currently in-use by a backup operation or block job,
-#          and is immutable.
+# @frozen: The bitmap is currently in-use by some operation and is immutable.
+#          If the bitmap was @active prior to the operation, new writes by the
+#          guest are being recorded in a temporary buffer, and will not be lost.
+#          Generally, bitmaps are cleared on successful use in an operation and
+#          the temporary buffer is committed into the bitmap. On failure, the
+#          temporary buffer is merged back into the bitmap without first
+#          clearing it.
+#          Please refer to the documentation for each bitmap-using operation,
+#          See also @blockdev-backup, @drive-backup.
 #
-# @disabled: The bitmap is currently in-use by an internal operation and is
-#            read-only. It can still be deleted.
+# @disabled: The bitmap is not currently recording new writes by the guest.
+#            This is requested explicitly via @block-dirty-bitmap-disable.
+#            It can still be cleared, deleted, or used for backup operations.
 #
 # @active: The bitmap is actively monitoring for new writes, and can be cleared,
 #          deleted, or used for backup operations.
 #
-# @locked: The bitmap is currently in-use by some operation and can not be
-#          cleared, deleted, or used for backup operations. (Since 2.12)
+# @locked: The bitmap is currently in-use by some operation and is immutable.
+#          If the bitmap was @active prior to the operation, it is still
+#          recording new writes. If the bitmap was @disabled, it is not
+#          recording new writes. (Since 2.12)
 #
 # Since: 2.4
 ##
@@ -450,11 +469,14 @@
 #
 # @status: current status of the dirty bitmap (since 2.4)
 #
+# @persistent: true if the bitmap will eventually be flushed to persistent
+#              storage (since 4.0)
+#
 # Since: 1.3
 ##
 { 'struct': 'BlockDirtyInfo',
   'data': {'*name': 'str', 'count': 'int', 'granularity': 'uint32',
-           'status': 'DirtyBitmapStatus'} }
+           'status': 'DirtyBitmapStatus', 'persistent': 'bool' } }
 
 ##
 # @Qcow2BitmapInfoFlags:
@@ -2091,8 +2113,14 @@
 # @block-dirty-bitmap-merge:
 #
 # Merge dirty bitmaps listed in @bitmaps to the @target dirty bitmap.
-# The @bitmaps dirty bitmaps are unchanged.
+# Dirty bitmaps in @bitmaps will be unchanged, except if it also appears
+# as the @target bitmap. Any bits already set in @target will still be
+# set after the merge, i.e., this operation does not clear the target.
 # On error, @target is unchanged.
+#
+# The resulting bitmap will count as dirty any clusters that were dirty in any
+# of the source bitmaps. This can be used to achieve backup checkpoints, or in
+# simpler usages, to copy bitmaps.
 #
 # Returns: nothing on success
 #          If @node is not a valid block device, DeviceNotFound
@@ -2128,7 +2156,7 @@
 ##
 # @x-debug-block-dirty-bitmap-sha256:
 #
-# Get bitmap SHA256
+# Get bitmap SHA256.
 #
 # Returns: BlockDirtyBitmapSha256 on success
 #          If @node is not a valid block device, DeviceNotFound
@@ -3061,6 +3089,12 @@
 #                         encrypted images, except when doing a metadata-only
 #                         probe of the image. (since 2.10)
 #
+# @data-file:             reference to or definition of the external data file.
+#                         This may only be specified for images that require an
+#                         external data file. If it is not specified for such
+#                         an image, the data file name is loaded from the image
+#                         file. (since 4.0)
+#
 # Since: 2.9
 ##
 { 'struct': 'BlockdevOptionsQcow2',
@@ -3075,7 +3109,8 @@
             '*l2-cache-entry-size': 'int',
             '*refcount-cache-size': 'int',
             '*cache-clean-interval': 'int',
-            '*encrypt': 'BlockdevQcow2Encryption' } }
+            '*encrypt': 'BlockdevQcow2Encryption',
+            '*data-file': 'BlockdevRef' } }
 
 ##
 # @SshHostKeyCheckMode:
@@ -4111,6 +4146,12 @@
 # Driver specific image creation options for qcow2.
 #
 # @file             Node to create the image format on
+# @data-file        Node to use as an external data file in which all guest
+#                   data is stored so that only metadata remains in the qcow2
+#                   file (since: 4.0)
+# @data-file-raw    True if the external data file must stay valid as a
+#                   standalone (read-only) raw image without looking at qcow2
+#                   metadata (default: false; since: 4.0)
 # @size             Size of the virtual disk in bytes
 # @version          Compatibility level (default: v3)
 # @backing-file     File name of the backing file if a backing file
@@ -4126,6 +4167,8 @@
 ##
 { 'struct': 'BlockdevCreateOptionsQcow2',
   'data': { 'file':             'BlockdevRef',
+            '*data-file':       'BlockdevRef',
+            '*data-file-raw':   'bool',
             'size':             'size',
             '*version':         'BlockdevQcow2Version',
             '*backing-file':    'str',

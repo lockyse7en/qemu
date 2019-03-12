@@ -450,7 +450,7 @@ void pcie_cap_slot_plug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
 void pcie_cap_slot_unplug_cb(HotplugHandler *hotplug_dev, DeviceState *dev,
                              Error **errp)
 {
-    object_unparent(OBJECT(dev));
+    object_property_set_bool(OBJECT(dev), false, "realized", NULL);
 }
 
 static void pcie_unplug_device(PCIBus *bus, PCIDevice *dev, void *opaque)
@@ -458,6 +458,7 @@ static void pcie_unplug_device(PCIBus *bus, PCIDevice *dev, void *opaque)
     HotplugHandler *hotplug_ctrl = qdev_get_hotplug_handler(DEVICE(dev));
 
     hotplug_handler_unplug(hotplug_ctrl, DEVICE(dev), &error_abort);
+    object_unparent(OBJECT(dev));
 }
 
 void pcie_cap_slot_unplug_request_cb(HotplugHandler *hotplug_dev,
@@ -834,9 +835,12 @@ void pcie_add_capability(PCIDevice *dev,
 /*
  * Sync the PCIe Link Status negotiated speed and width of a bridge with the
  * downstream device.  If downstream device is not present, re-write with the
- * Link Capability fields.  Limit width and speed to bridge capabilities for
- * compatibility.  Use config_read to access the downstream device since it
- * could be an assigned device with volatile link information.
+ * Link Capability fields.  If downstream device reports invalid width or
+ * speed, replace with minimum values (LnkSta fields are RsvdZ on VFs but such
+ * values interfere with PCIe native hotplug detecting new devices).  Limit
+ * width and speed to bridge capabilities for compatibility.  Use config_read
+ * to access the downstream device since it could be an assigned device with
+ * volatile link information.
  */
 void pcie_sync_bridge_lnk(PCIDevice *bridge_dev)
 {
@@ -856,11 +860,15 @@ void pcie_sync_bridge_lnk(PCIDevice *bridge_dev)
         if ((lnksta & PCI_EXP_LNKSTA_NLW) > (lnkcap & PCI_EXP_LNKCAP_MLW)) {
             lnksta &= ~PCI_EXP_LNKSTA_NLW;
             lnksta |= lnkcap & PCI_EXP_LNKCAP_MLW;
+        } else if (!(lnksta & PCI_EXP_LNKSTA_NLW)) {
+            lnksta |= QEMU_PCI_EXP_LNKSTA_NLW(QEMU_PCI_EXP_LNK_X1);
         }
 
         if ((lnksta & PCI_EXP_LNKSTA_CLS) > (lnkcap & PCI_EXP_LNKCAP_SLS)) {
             lnksta &= ~PCI_EXP_LNKSTA_CLS;
             lnksta |= lnkcap & PCI_EXP_LNKCAP_SLS;
+        } else if (!(lnksta & PCI_EXP_LNKSTA_CLS)) {
+            lnksta |= QEMU_PCI_EXP_LNKSTA_CLS(QEMU_PCI_EXP_LNK_2_5GT);
         }
     }
 
